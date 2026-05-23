@@ -29,9 +29,10 @@
 from typing import Optional
 from typing import Union
 
-from rclpy.node import Node
 from rclpy.callback_groups import ReentrantCallbackGroup
-from rclpy.executors import SingleThreadedExecutor
+from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
+from rclpy.node import Node
+from rclpy.parameter import Parameter
 from rclpy.qos import DurabilityPolicy
 from rclpy.qos import HistoryPolicy
 from rclpy.qos import QoSProfile
@@ -50,7 +51,7 @@ class TransformListener:
     def __init__(
         self,
         buffer: Buffer,
-        node: Node,
+        node: Optional[Node],
         *,
         spin_thread: bool = False,
         qos: Optional[Union[QoSProfile, int]] = None,
@@ -60,7 +61,7 @@ class TransformListener:
         Constructor.
 
         :param buffer: The buffer to propagate changes to when tf info updates.
-        :param node: The ROS2 node.
+        :param node: The ROS2 node. Pass None to automatically create one.
         :param spin_thread: Whether to create a dedidcated thread to spin this node.
         :param qos: A QoSProfile or a history depth to apply to subscribers.
         :param static_qos: A QoSProfile or a history depth to apply to tf_static subscribers.
@@ -78,6 +79,18 @@ class TransformListener:
                 history=HistoryPolicy.KEEP_LAST,
                 )
         self.buffer = buffer
+        if node is None:
+            # Sim time is definitely not needed in TF listener node
+            params = [Parameter('use_sim_time', value=False)]
+            # create a unique name for the node
+            # but specify its name in cli_args to override any __node passed on the command line.
+            name = f'transform_listener_impl_{id(self):010x}'
+            cli = ['--ros-args', '-r', '__node:=' + name]
+            node = Node(name,
+                        cli_args=cli,
+                        enable_rosout=False,
+                        start_parameter_services=False,
+                        parameter_overrides=params)
         self.node = node
         # Default callback group is mutually exclusive, which would prevent waiting for transforms
         # from another callback in the same group.
@@ -92,7 +105,10 @@ class TransformListener:
 
             def run_func():
                 self.executor.add_node(self.node)
-                self.executor.spin()
+                try:
+                    self.executor.spin()
+                except ExternalShutdownException:
+                    pass
                 self.executor.remove_node(self.node)
 
             self.dedicated_listener_thread = Thread(target=run_func)
@@ -106,10 +122,9 @@ class TransformListener:
         self.unregister()
 
     def unregister(self) -> None:
-        """
-        Unregisters all tf subscribers.
-        """
-        self.node.destroy_subscription(self.tf_sub)
+        """Unregisters all tf subscribers."""
+        if hasattr(self, 'tf_sub'):
+            self.node.destroy_subscription(self.tf_sub)
         self.node.destroy_subscription(self.tf_static_sub)
 
     def callback(self, data: TFMessage) -> None:

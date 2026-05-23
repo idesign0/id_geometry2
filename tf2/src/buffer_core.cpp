@@ -334,7 +334,7 @@ tf2::TF2Error BufferCore::walkToTopParent(
     frame_chain->clear();
   }
 
-  // Short circuit if zero length transform to allow lookups on non existant links
+  // Short circuit if zero length transform to allow lookups on non existent links
   if (source_id == target_id) {
     f.finalize(Identity, time);
     return tf2::TF2Error::TF2_NO_ERROR;
@@ -355,6 +355,7 @@ tf2::TF2Error BufferCore::walkToTopParent(
 
   std::string extrapolation_error_string;
   bool extrapolation_might_have_occurred = false;
+  TimePoint extrapolation_latest_time = TimePointZero;
 
   while (frame != 0) {
     TimeCacheInterfacePtr cache = getFrame(frame);
@@ -373,6 +374,7 @@ tf2::TF2Error BufferCore::walkToTopParent(
       // Just break out here... there may still be a path from source -> target
       top_parent = frame;
       extrapolation_might_have_occurred = true;
+      extrapolation_latest_time = cache->getLatestTimestamp();
       break;
     }
 
@@ -416,6 +418,25 @@ tf2::TF2Error BufferCore::walkToTopParent(
 
     CompactFrameID parent = f.gather(cache, time, error_string);
     if (parent == 0) {
+      if (extrapolation_might_have_occurred) {
+        // Shouldn't treat second walk path failure as extrapolation if the
+        // first walk path failure is older than the latest data in the cache
+        TimePoint phase2_latest = cache->getLatestTimestamp();
+
+        // prefer source for tie-breaker
+        bool prefer_phase1 = (extrapolation_latest_time >= phase2_latest);
+
+        if (prefer_phase1) {
+          if (error_string) {
+            std::stringstream ss;
+            ss << extrapolation_error_string << ", when looking up transform from frame ["
+               << lookupFrameString(source_id) << "] to frame [" << lookupFrameString(target_id)
+               << "]";
+            *error_string = ss.str();
+          }
+          return tf2::TF2Error::TF2_EXTRAPOLATION_ERROR;
+        }
+      }
       if (error_string) {
         std::stringstream ss;
         ss << *error_string << ", when looking up transform from frame [" << lookupFrameString(
@@ -603,7 +624,7 @@ geometry_msgs::msg::VelocityStamped BufferCore::lookupVelocity(
 
   auto start_time =
     std::max(0.00001 + averaging_interval_seconds, end_time) - averaging_interval_seconds;
-  // correct for the possiblity that start time was truncated above.
+  // correct for the possibility that start time was truncated above.
   auto corrected_averaging_interval = end_time - start_time;
 
   tf2::Transform start, end;
@@ -807,12 +828,12 @@ void BufferCore::lookupTransformImpl(
   validateFrameId("lookupTransform argument source_frame", source_frame);
   validateFrameId("lookupTransform argument fixed_frame", fixed_frame);
 
-  tf2::Transform tf1, tf2;
+  tf2::Transform transform1, transform2;
 
-  lookupTransformImpl(fixed_frame, source_frame, source_time, tf1, time_out);
-  lookupTransformImpl(target_frame, fixed_frame, target_time, tf2, time_out);
+  lookupTransformImpl(fixed_frame, source_frame, source_time, transform1, time_out);
+  lookupTransformImpl(target_frame, fixed_frame, target_time, transform2, time_out);
 
-  transform = tf2 * tf1;
+  transform = transform2 * transform1;
 }
 
 struct CanTransformAccum
@@ -1341,7 +1362,7 @@ void BufferCore::cancelTransformableRequest(TransformableRequestHandle handle)
   transformable_requests_.erase(remove_it, transformable_requests_.end());
 }
 
-// backwards compability for tf methods
+// backwards compatibility for tf methods
 bool BufferCore::_frameExists(const std::string & frame_id_str) const
 {
   std::unique_lock<std::mutex> lock(frame_mutex_);
@@ -1451,7 +1472,7 @@ std::string BufferCore::_allFramesAsDot(TimePoint current_time) const
   TransformStorage temp;
 
   if (frames_.size() == 1) {
-    mstream << "\"no tf data recieved\"";
+    mstream << "\"no tf data received\"";
   }
   mstream.precision(3);
   mstream.setf(std::ios::fixed, std::ios::floatfield);
